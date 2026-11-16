@@ -69,7 +69,7 @@ JPEG 2000, HTJ2K, JPEG XL, vídeo encapsulado e dados de pixel de ponto flutuant
 | [`src/dicomviewer/`](src/dicomviewer/) | Núcleo C++ independente do Qt. Valida o arquivo, mantém a sessão DCMTK, aplica contraste, devolve pixels e metadados e relata falhas com erros tipados. |
 | [`src/viewer/`](src/viewer/) | Interface Qt Widgets. O carregador usa Qt Concurrent e converte os pixels em `QImage`. O viewport cuida do zoom, do deslocamento e da rotação. |
 | [`tests/`](tests/) | Suítes GoogleTest executadas pelo CTest. |
-| [`.github/workflows/build.yml`](.github/workflows/build.yml) | Jobs de build e testes em Fedora 45, Ubuntu 26.04 LTS e Windows Server 2025 (x64). |
+| [`.github/workflows/build.yml`](.github/workflows/build.yml) | Jobs de build e testes em Fedora 45, Ubuntu 26.04 LTS e Windows Server 2022 (x64). |
 
 No Linux, as leituras posteriores continuam vinculadas ao arquivo que a sessão abriu. A interface aplica apenas o resultado da solicitação mais recente de frame ou contraste.
 

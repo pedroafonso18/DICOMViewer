@@ -69,7 +69,7 @@ JPEG 2000, HTJ2K, JPEG XL, encapsulated video, and floating-point pixel data are
 | [`src/dicomviewer/`](src/dicomviewer/) | Qt-independent C++ core. Validates files, owns the DCMTK session, applies contrast, returns pixels and metadata, and reports typed errors. |
 | [`src/viewer/`](src/viewer/) | Qt Widgets interface. The loader uses Qt Concurrent and copies pixels into a `QImage`. The viewport handles zoom, pan, and rotation. |
 | [`tests/`](tests/) | GoogleTest suites run through CTest. |
-| [`.github/workflows/build.yml`](.github/workflows/build.yml) | Build and test jobs for Fedora 45, Ubuntu 26.04 LTS, and Windows Server 2025 (x64). |
+| [`.github/workflows/build.yml`](.github/workflows/build.yml) | Build and test jobs for Fedora 45, Ubuntu 26.04 LTS, and Windows Server 2022 (x64). |
 
 On Linux, subsequent reads stay tied to the file that the session originally opened. The interface applies only the result of the latest frame or contrast request.
 
