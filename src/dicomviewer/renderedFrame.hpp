@@ -20,7 +20,8 @@ namespace DICOMViewer {
 
 		[[nodiscard]] unsigned long width() const noexcept;
 		[[nodiscard]] unsigned long height() const noexcept;
-		[[nodiscard]] std::span<const std::uint8_t> pixels() const noexcept;
+		[[nodiscard]] std::span<const std::uint8_t> pixels() const & noexcept;
+		std::span<const std::uint8_t> pixels() const && = delete;
 
 	private:
 		unsigned long frameWidth;

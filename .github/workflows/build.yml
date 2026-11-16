@@ -11,7 +11,7 @@ jobs:
     container: fedora:45
     steps:
       - name: Install build dependencies
-        run: dnf install -y git cmake gcc-c++ make dcmtk-devel gtest-devel gmock
+        run: dnf install -y git cmake gcc-c++ make dcmtk-devel gtest-devel gmock qt6-qtbase-devel
       - uses: actions/checkout@v4
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build --parallel

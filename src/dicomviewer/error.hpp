@@ -13,6 +13,7 @@ namespace DICOMViewer {
 		FileAccess,
 		InvalidDicom,
 		MissingPixelData,
+		IncompletePixelData,
 		UnsupportedEncoding,
 		UnsupportedPhotometricInterpretation,
 		InvalidWindow,

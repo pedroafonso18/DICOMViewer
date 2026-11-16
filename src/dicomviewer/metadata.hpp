@@ -15,6 +15,7 @@ namespace DICOMViewer {
 		unsigned long width{};
 		unsigned long height{};
 		unsigned long frameCount{};
+		double pixelAspectRatio{1.0};
 		std::string modality;
 		std::string photometricInterpretation;
 		std::string orientation;

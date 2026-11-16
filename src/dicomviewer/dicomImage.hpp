@@ -9,6 +9,8 @@
 
 #include <dcmtk/config/osconfig.h>
 #include <dcmtk/dcmdata/dcfilefo.h>
+#include <dcmtk/dcmdata/dcdeftag.h>
+#include <dcmtk/dcmdata/dcvrus.h>
 #include <dcmtk/dcmimgle/dcmimage.h>
 
 #include <filesystem>
@@ -30,8 +32,10 @@ namespace DICOMViewer {
 		Image& operator=(Image&&) noexcept;
 
 		[[nodiscard]] const Metadata& metadata() const noexcept;
-		[[nodiscard]] ContrastWindow initialWindow() const noexcept;
+		// A missing window means the initial contrast comes from a stored VOI LUT.
+		[[nodiscard]] std::optional<ContrastWindow> initialWindow() const noexcept;
 
+		// A missing override restores the initial contrast.
 		[[nodiscard]] Result<RenderedFrame> render(
 			unsigned long frame = 0,
 			std::optional<ContrastWindow> window = std::nullopt
@@ -40,9 +44,13 @@ namespace DICOMViewer {
 	private:
 		struct ImageState {
 			DcmFileFormat file;
+			// DCMTK borrows the LUT data for the lifetime of the active transform.
+			DcmUnsignedShort fractionalLut{DcmTag(DCM_LUTData, EVR_US)};
 			std::unique_ptr<DicomImage> image;
 			Metadata metadata;
-			ContrastWindow initialWindow{};
+			std::optional<ContrastWindow> initialWindow;
+			std::optional<unsigned long> initialLut;
+			unsigned long decodedFrame{};
 		};
 
 		explicit Image(std::unique_ptr<ImageState> imageState) noexcept;

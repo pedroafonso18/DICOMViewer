@@ -31,7 +31,7 @@ namespace DICOMViewer {
 
 	//--------------------------------------------
 
-	std::span<const std::uint8_t> RenderedFrame::pixels() const noexcept
+	std::span<const std::uint8_t> RenderedFrame::pixels() const & noexcept
 	{
 		return pixelData;
 	}

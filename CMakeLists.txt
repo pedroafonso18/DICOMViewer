@@ -17,6 +17,19 @@ target_link_libraries(dicom_core
 )
 
 include(CTest)
+option(DICOMVIEWER_BUILD_APP "Build the Qt Widgets viewer" ON)
+if(DICOMVIEWER_BUILD_APP)
+    find_package(Qt6 CONFIG REQUIRED COMPONENTS Widgets Concurrent)
+    add_library(dicom_viewer_ui STATIC
+        src/viewer/mainWindow.cpp
+        src/viewer/imageViewport.cpp
+        src/viewer/imageLoader.cpp
+    )
+    target_link_libraries(dicom_viewer_ui PUBLIC dicom_core Qt6::Widgets PRIVATE Qt6::Concurrent)
+    add_executable(dicom_viewer src/viewer/main.cpp)
+    target_link_libraries(dicom_viewer PRIVATE dicom_viewer_ui)
+endif()
+
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

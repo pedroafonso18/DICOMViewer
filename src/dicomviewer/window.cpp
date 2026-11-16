@@ -8,7 +8,8 @@ namespace DICOMViewer {
 
 	bool ContrastWindow::isValid() const noexcept
 	{
-		return std::isfinite(windowLevel) && std::isfinite(width) && width >= 1.0;
+		return std::isfinite(windowLevel) && std::isfinite(width) &&
+			(function == VoiFunction::Linear ? width >= minimumLinearWidth : width > 0.0);
 	}
 
 } // namespace DICOMViewer
