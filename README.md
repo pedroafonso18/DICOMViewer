@@ -39,6 +39,33 @@ cmake --build build --parallel
 ./build/dicom_viewer
 ```
 
+## Compilar no Windows (x64)
+
+- Instale o Git, o CMake 3.24 ou superior e o Visual Studio 2022 com a carga de trabalho **Desenvolvimento para desktop com C++** e o SDK do Windows.
+- No instalador do Qt, selecione **Qt 6.8 — MSVC 2022 64-bit**. A CI usa o Qt 6.8.3. [Instalação do Qt](https://doc.qt.io/qt-6.8/qt-online-installation.html)
+- Instale e inicialize o vcpkg com `bootstrap-vcpkg.bat`. [Instalação do vcpkg](https://learn.microsoft.com/vcpkg/get_started/get-started)
+
+Clone o repositório se necessário e abra o PowerShell na raiz do projeto. Ajuste `$vcpkgRoot` e `$qtRoot` para corresponder às suas instalações.
+
+```powershell
+$vcpkgRoot = 'C:\vcpkg'
+$qtRoot = 'C:\Qt\6.8.3\msvc2022_64'
+& "$vcpkgRoot\vcpkg.exe" install dcmtk gtest --triplet x64-windows
+
+cmake -S . -B build-windows -G "Visual Studio 17 2022" -A x64 `
+  "-DCMAKE_TOOLCHAIN_FILE=$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows `
+  "-DQt6_DIR=$qtRoot/lib/cmake/Qt6"
+cmake --build build-windows --config Release --parallel
+
+$env:Path = "$qtRoot\bin;$vcpkgRoot\installed\x64-windows\bin;$env:Path"
+$env:QT_PLUGIN_PATH = "$qtRoot\plugins"
+ctest --test-dir build-windows -C Release --output-on-failure
+.\build-windows\Release\dicom_viewer.exe
+```
+
+Os ajustes de `Path` e `QT_PLUGIN_PATH` valem para a sessão atual do PowerShell.
+
 ## Usar o visualizador
 
 | Controle | Comportamento |
