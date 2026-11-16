@@ -27,7 +27,7 @@ namespace DICOMViewer {
 
 	//--------------------------------------------
 
-	void MetadataPanel::setMetadata(const Metadata& metadata)
+	void MetadataPanel::setMetadata(const Metadata& metadata, std::span<const ContrastWindow> windows)
 	{
 		while (fields->rowCount() > 0) {
 			fields->removeRow(0);
@@ -51,7 +51,7 @@ namespace DICOMViewer {
 		addField(tr("View position"), QString::fromStdString(metadata.viewPosition));
 
 		QStringList presets;
-		for (const auto& window : metadata.windows) {
+		for (const auto& window : windows) {
 			presets.append(tr("%1 / %2").arg(window.windowLevel).arg(window.width));
 		}
 		addField(tr("Stored level / width"), presets.join('\n'));

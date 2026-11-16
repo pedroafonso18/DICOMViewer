@@ -6,7 +6,6 @@
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
-#include <QDoubleSpinBox>
 #include <QDockWidget>
 #include <QFile>
 #include <QFileDialog>
@@ -22,6 +21,7 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
 #include <limits>
 
 //--------------------------------------------
@@ -39,7 +39,10 @@ namespace DICOMViewer {
 		constexpr Uint16 fixtureFrameCount = 2;
 		constexpr double fixtureWindowLevel = 128.0;
 		constexpr double presetWindowLevel = 64.0;
+		constexpr double presetWindowWidth = 1e-9;
 		constexpr double manualWindowLevel = 20.0;
+		constexpr double secondFrameDefaultLevel = 192.0;
+		constexpr double secondFrameDefaultWidth = 64.0;
 
 		void writeDicom(const QString& path)
 		{
@@ -58,11 +61,21 @@ namespace DICOMViewer {
 			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_PixelRepresentation, unsignedPixelRepresentation).good());
 			ASSERT_TRUE(dataset.putAndInsertString(DCM_NumberOfFrames, std::to_string(fixtureFrameCount).c_str()).good());
 			ASSERT_TRUE(dataset.putAndInsertString(DCM_WindowCenter, "128\\64").good());
-			ASSERT_TRUE(dataset.putAndInsertString(DCM_WindowWidth, "256\\128").good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_WindowWidth, "256\\1e-9").good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_VOILUTFunction, "SIGMOID").good());
+			constexpr long secondFrameIndex = 1;
+			DcmItem* frame = nullptr;
+			DcmItem* voi = nullptr;
+			ASSERT_TRUE(dataset.findOrCreateSequenceItem(
+				DCM_PerFrameFunctionalGroupsSequence, frame, secondFrameIndex).good());
+			ASSERT_TRUE(frame->findOrCreateSequenceItem(DCM_FrameVOILUTSequence, voi).good());
+			ASSERT_TRUE(voi->putAndInsertFloat64(DCM_WindowCenter, secondFrameDefaultLevel).good());
+			ASSERT_TRUE(voi->putAndInsertFloat64(DCM_WindowWidth, secondFrameDefaultWidth).good());
 			const std::array<Uint8, fixtureSide * fixtureSide * fixtureFrameCount> pixels{
 				0, maxPixelValue, maxPixelValue, maxPixelValue, maxPixelValue, maxPixelValue, maxPixelValue, 0};
 			ASSERT_TRUE(dataset.putAndInsertUint8Array(DCM_PixelData, pixels.data(), pixels.size()).good());
-			ASSERT_TRUE(file.saveFile(OFFilename(QFile::encodeName(path).constData()),
+			const std::filesystem::path nativePath(path.toStdU16String());
+			ASSERT_TRUE(file.saveFile(OFFilename(nativePath.c_str()),
 				EXS_LittleEndianExplicit).good());
 		}
 
@@ -202,28 +215,39 @@ namespace DICOMViewer {
 			EXPECT_NE(viewport.pixelColor(center.x(), center.y() + geometryProbeOffset), background);
 			EXPECT_EQ(viewport.pixelColor(center.x() + geometryProbeOffset, center.y()), background);
 
-			auto* level = window.findChild<QDoubleSpinBox*>("windowLevel");
+			auto* level = window.findChild<QLineEdit*>("windowLevel");
+			auto* width = window.findChild<QLineEdit*>("windowWidth");
 			auto* presets = window.findChild<QComboBox*>("contrastPresets");
 			auto* frameIndicator = window.findChild<QLabel*>("frameIndicator");
 			auto* next = window.findChild<QPushButton*>("nextFrame");
 			auto* rotateRight = window.findChild<QAction*>("rotateRight");
 			auto* fit = window.findChild<QAction*>("fitToWindow");
 			auto* restore = window.findChild<QAction*>("restoreView");
-			ASSERT_TRUE(level && presets && frameIndicator && next && rotateRight && fit && restore);
+			ASSERT_TRUE(level && width && presets && frameIndicator && next && rotateRight && fit && restore);
 
-			EXPECT_EQ(level->value(), fixtureWindowLevel);
+			EXPECT_EQ(level->locale().toDouble(level->text()), fixtureWindowLevel);
 			constexpr int secondStoredPresetIndex = 2;
 			presets->setCurrentIndex(secondStoredPresetIndex);
 			presets->activated(secondStoredPresetIndex);
 			ASSERT_TRUE(waitFor([&] { return open->isEnabled(); }));
-			EXPECT_EQ(level->value(), presetWindowLevel);
+			EXPECT_EQ(level->locale().toDouble(level->text()), presetWindowLevel);
 
-			level->setValue(manualWindowLevel);
+			EXPECT_DOUBLE_EQ(width->locale().toDouble(width->text()), presetWindowWidth);
+			level->setText(level->locale().toString(manualWindowLevel));
+			level->editingFinished();
 			next->click();
 			ASSERT_TRUE(waitFor([&] { return open->isEnabled(); }));
-			EXPECT_EQ(level->value(), manualWindowLevel);
+			EXPECT_EQ(level->locale().toDouble(level->text()), manualWindowLevel);
 			EXPECT_EQ(frameIndicator->text(), QStringLiteral("2 of 2"));
+			EXPECT_DOUBLE_EQ(width->locale().toDouble(width->text()), presetWindowWidth);
 			EXPECT_FALSE(next->isEnabled());
+
+			constexpr int fileDefaultPresetIndex = 0;
+			presets->setCurrentIndex(fileDefaultPresetIndex);
+			presets->activated(fileDefaultPresetIndex);
+			ASSERT_TRUE(waitFor([&] { return open->isEnabled(); }));
+			EXPECT_DOUBLE_EQ(level->locale().toDouble(level->text()), secondFrameDefaultLevel);
+			EXPECT_DOUBLE_EQ(width->locale().toDouble(width->text()), secondFrameDefaultWidth);
 
 			const auto beforeRotation = imageViewport->grab().toImage();
 			rotateRight->trigger();
@@ -254,7 +278,7 @@ namespace DICOMViewer {
 
 			restore->trigger();
 			ASSERT_TRUE(waitFor([&] { return open->isEnabled(); }));
-			EXPECT_EQ(level->value(), fixtureWindowLevel);
+			EXPECT_EQ(level->locale().toDouble(level->text()), fixtureWindowLevel);
 			EXPECT_EQ(frameIndicator->text(), QStringLiteral("1 of 2"));
 			EXPECT_EQ(imageViewport->grab().toImage(), viewport);
 		}

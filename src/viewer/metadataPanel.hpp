@@ -6,6 +6,8 @@
 
 #include <QDockWidget>
 
+#include <span>
+
 class QFormLayout;
 
 //--------------------------------------------
@@ -16,7 +18,7 @@ namespace DICOMViewer {
 	public:
 		explicit MetadataPanel(QWidget* parent = nullptr);
 
-		void setMetadata(const Metadata& metadata);
+		void setMetadata(const Metadata& metadata, std::span<const ContrastWindow> windows);
 
 	private:
 		void addField(const QString& name, const QString& value);

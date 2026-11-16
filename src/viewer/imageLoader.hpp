@@ -17,7 +17,7 @@ namespace DICOMViewer {
 	class ImageLoader {
 	public:
 		[[nodiscard]] Result<LoadedImage> load(const QString& filePath);
-		[[nodiscard]] Result<QImage> render(const FrameRequest& request);
+		[[nodiscard]] Result<RenderedImage> render(const FrameRequest& request);
 
 	private:
 		std::optional<Image> currentSession;

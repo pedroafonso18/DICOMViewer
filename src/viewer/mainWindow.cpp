@@ -1,12 +1,12 @@
 #include "viewer/mainWindow.hpp"
 
-#include "viewer/contrastSpinBox.hpp"
+#include "viewer/contrastInput.hpp"
 #include "viewer/imageViewport.hpp"
 #include "viewer/metadataPanel.hpp"
 
 #include <QAction>
 #include <QComboBox>
-#include <QDoubleSpinBox>
+#include <QLocale>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -33,10 +33,7 @@ namespace DICOMViewer {
 		constexpr int indeterminateProgress = 0;
 		constexpr int metadataPanelWidth = 290;
 		constexpr int frameControlsPadding = 8;
-		constexpr int contrastDecimals = 8;
 		constexpr int contrastControlsSpacing = 8;
-		constexpr double contrastInputLimit = 1e12;
-		constexpr double smallestWidthInput = 0.00000001;
 		constexpr ContrastWindow defaultManualWindow{0.0, ContrastWindow::minimumLinearWidth};
 		constexpr int fileDefaultPresetIndex = 0;
 		constexpr int firstStoredPresetIndex = 1;
@@ -146,17 +143,10 @@ namespace DICOMViewer {
 		auto* inputLayout = new QHBoxLayout(inputs);
 		inputLayout->setContentsMargins({});
 		inputLayout->setSpacing(contrastControlsSpacing);
-		level = new ContrastSpinBox(inputs);
+		level = new ContrastInput(inputs);
 		level->setObjectName(QStringLiteral("windowLevel"));
-		width = new ContrastSpinBox(inputs);
+		width = new ContrastInput(inputs);
 		width->setObjectName(QStringLiteral("windowWidth"));
-		for (auto* input : {level, width}) {
-			input->setDecimals(contrastDecimals);
-			input->setKeyboardTracking(false);
-			input->setMaximum(contrastInputLimit);
-		}
-		level->setMinimum(-contrastInputLimit);
-		width->setMinimum(smallestWidthInput);
 		auto* levelLabel = new QLabel(tr("Window Level"), inputs);
 		levelLabel->setBuddy(level);
 		inputLayout->addWidget(levelLabel);
@@ -168,8 +158,8 @@ namespace DICOMViewer {
 		toolbar->addWidget(inputs);
 
 		connect(presets, &QComboBox::activated, this, &MainWindow::selectPreset);
-		connect(level, &QDoubleSpinBox::valueChanged, this, &MainWindow::adjustContrast);
-		connect(width, &QDoubleSpinBox::valueChanged, this, &MainWindow::adjustContrast);
+		connect(level, &QLineEdit::editingFinished, this, [this] { adjustContrast(level); });
+		connect(width, &QLineEdit::editingFinished, this, [this] { adjustContrast(width); });
 	}
 
 	//--------------------------------------------
@@ -241,22 +231,34 @@ namespace DICOMViewer {
 
 		currentImage = std::get<LoadedImage>(std::move(result));
 		const auto& metadata = currentImage->metadata;
-		viewport->setImage(currentImage->image, metadata.pixelAspectRatio);
+		viewport->setImage(currentImage->frame.image, metadata.pixelAspectRatio);
 		viewport->restoreView();
-		metadataPanel->setMetadata(metadata);
+		metadataPanel->setMetadata(metadata, currentImage->frame.contrast.presets);
 		desiredRequest = displayedRequest = {};
-		presets->clear();
-		presets->addItem(currentImage->initialWindow || metadata.pixelFormat == PixelFormat::Rgb8
-			? tr("File default") : tr("File default (VOI LUT)"));
-		for (const auto& window : metadata.windows) {
-			presets->addItem(tr("Level %1 / Width %2").arg(window.windowLevel).arg(window.width));
-		}
-		presets->addItem(tr("Custom"));
+		updatePresets();
 		updateContrastControls();
 		updateControls();
 
 		currentSummary = tr("%1    •    %2 × %3 px").arg(fileName).arg(metadata.width).arg(metadata.height);
 		statusBar()->showMessage(currentSummary);
+	}
+
+	//--------------------------------------------
+
+	void MainWindow::updatePresets()
+	{
+		const QSignalBlocker blockPresets(presets);
+		const auto& contrast = currentImage->frame.contrast;
+		presets->clear();
+		presets->addItem(contrast.defaultWindow || currentImage->metadata.pixelFormat == PixelFormat::Rgb8
+			? tr("File default") : tr("File default (VOI LUT)"));
+		for (const auto& window : contrast.presets) {
+			const auto inputLocale = locale();
+			presets->addItem(tr("Level %1 / Width %2")
+				.arg(inputLocale.toString(window.windowLevel, 'g', QLocale::FloatingPointShortest))
+				.arg(inputLocale.toString(window.width, 'g', QLocale::FloatingPointShortest)));
+		}
+		presets->addItem(tr("Custom"));
 	}
 
 	//--------------------------------------------
@@ -270,12 +272,12 @@ namespace DICOMViewer {
 			desiredRequest.window.reset();
 		} else {
 			const auto storedIndex = static_cast<std::size_t>(index - firstStoredPresetIndex);
-			const auto& stored = currentImage->metadata.windows;
+			const auto& stored = currentImage->frame.contrast.presets;
 			if (storedIndex < stored.size()) {
 				desiredRequest.window = stored[storedIndex];
 			} else {
 				desiredRequest.window = desiredRequest.window.value_or(
-					currentImage->initialWindow.value_or(defaultManualWindow));
+					currentImage->frame.contrast.defaultWindow.value_or(defaultManualWindow));
 			}
 		}
 		updateContrastControls();
@@ -288,14 +290,23 @@ namespace DICOMViewer {
 
 	//--------------------------------------------
 
-	void MainWindow::adjustContrast()
+	void MainWindow::adjustContrast(ContrastInput* editedInput)
 	{
-		if (!currentImage || currentImage->metadata.pixelFormat == PixelFormat::Rgb8) {
+		if (!currentImage || !editedInput->isEnabled()) {
 			return;
 		}
-		auto edited = desiredRequest.window.value_or(currentImage->initialWindow.value_or(defaultManualWindow));
-		edited.windowLevel = level->value();
-		edited.width = width->value();
+		const auto previous = desiredRequest.window.value_or(
+			currentImage->frame.contrast.defaultWindow.value_or(defaultManualWindow));
+		auto edited = previous;
+		const auto value = editedInput->number();
+		if (value) {
+			auto& field = editedInput == level ? edited.windowLevel : edited.width;
+			field = *value;
+		}
+		if (!value || !edited.isValid() || edited == previous) {
+			updateContrastControls();
+			return;
+		}
 		desiredRequest.window = edited;
 		updateContrastControls();
 		startRender();
@@ -358,8 +369,15 @@ namespace DICOMViewer {
 			showError(tr("Could not update image"), tr("The last rendered frame is still displayed."), *error);
 			return;
 		}
-		currentImage->image = std::get<QImage>(std::move(result));
-		viewport->setImage(currentImage->image, currentImage->metadata.pixelAspectRatio);
+		auto next = std::get<RenderedImage>(std::move(result));
+		const bool presetsChanged = currentImage->frame.contrast.presets != next.contrast.presets;
+		currentImage->frame = std::move(next);
+		if (presetsChanged) {
+			updatePresets();
+			metadataPanel->setMetadata(currentImage->metadata, currentImage->frame.contrast.presets);
+		}
+		updateContrastControls(true);
+		viewport->setImage(currentImage->frame.image, currentImage->metadata.pixelAspectRatio);
 		displayedRequest = completed;
 		updateControls();
 	}
@@ -376,7 +394,7 @@ namespace DICOMViewer {
 		for (auto* action : {fitAction, restoreAction, rotateLeftAction, rotateRightAction}) {
 			action->setEnabled(canEdit);
 		}
-		const bool hasActiveLut = canAdjustContrast && !currentImage->initialWindow && !desiredRequest.window;
+		const bool hasActiveLut = canAdjustContrast && !currentImage->frame.contrast.defaultWindow && !desiredRequest.window;
 		presets->setEnabled(canAdjustContrast);
 		level->setEnabled(canAdjustContrast && !hasActiveLut);
 		width->setEnabled(canAdjustContrast && !hasActiveLut);
@@ -389,24 +407,24 @@ namespace DICOMViewer {
 
 	//--------------------------------------------
 
-	void MainWindow::updateContrastControls()
+	void MainWindow::updateContrastControls(bool preserveDraft)
 	{
 		const QSignalBlocker blockLevel(level);
 		const QSignalBlocker blockWidth(width);
 		const QSignalBlocker blockPresets(presets);
-		const auto selected = desiredRequest.window.value_or(currentImage->initialWindow.value_or(defaultManualWindow));
-		width->setMinimum(selected.function == VoiFunction::Linear ? ContrastWindow::minimumLinearWidth : smallestWidthInput);
-		const bool hasActiveLut = currentImage->metadata.pixelFormat == PixelFormat::Grayscale8 &&
-			!currentImage->initialWindow && !desiredRequest.window;
-		const auto placeholder = hasActiveLut ? QStringLiteral("—") : QString{};
-		level->setSpecialValueText(placeholder);
-		width->setSpecialValueText(placeholder);
-		level->setValue(hasActiveLut ? level->minimum() : selected.windowLevel);
-		width->setValue(hasActiveLut ? width->minimum() : selected.width);
+		const auto selected = desiredRequest.window.value_or(currentImage->frame.contrast.defaultWindow.value_or(defaultManualWindow));
+		const bool hasWindow = currentImage->metadata.pixelFormat == PixelFormat::Grayscale8 &&
+			(currentImage->frame.contrast.defaultWindow || desiredRequest.window);
+		if (!preserveDraft || !level->hasFocus() || !level->isModified()) {
+			level->showNumber(hasWindow ? std::optional{selected.windowLevel} : std::nullopt);
+		}
+		if (!preserveDraft || !width->hasFocus() || !width->isModified()) {
+			width->showNumber(hasWindow ? std::optional{selected.width} : std::nullopt);
+		}
 
 		int index = fileDefaultPresetIndex;
 		if (desiredRequest.window) {
-			const auto& stored = currentImage->metadata.windows;
+			const auto& stored = currentImage->frame.contrast.presets;
 			const auto match = std::ranges::find(stored, selected);
 			index = firstStoredPresetIndex + static_cast<int>(match - stored.begin());
 		}

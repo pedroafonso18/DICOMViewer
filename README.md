@@ -32,7 +32,7 @@ continua disponível.
 | **Rotate Left** / **Rotate Right** | Gira a imagem em passos de 90°. |
 | **Fit to Window** | Centraliza e reenquadra a imagem com a rotação atual. |
 | **Restore View** | Volta ao primeiro frame, à orientação, ao enquadramento e ao contraste da abertura. |
-| **Previous** / **Next** | Troca de frame preservando enquadramento, rotação e contraste manual. |
+| **Previous** / **Next** | Troca de frame preservando enquadramento, rotação e contraste manual. Com **File default**, aplica a janela do frame quando ela estiver gravada no DICOM. |
 | **Preset**, **Window Level** e **Window Width** | Selecionam a janela gravada ou ajustam o contraste em imagens monocromáticas. Para substituir uma VOI LUT gravada, selecione **Custom**. |
 | **Metadata** | Abre ou recolhe o painel lateral de metadados. |
 
@@ -55,7 +55,9 @@ integração usa DICOMs temporários para verificar a integridade dos pixels,
 polaridade, transformações de contraste, ordem dos canais RGB e leitura de
 frames nativos e JPEG Lossless. Os testes Qt executam sem servidor gráfico e
 verificam abertura com erro, navegação, contraste e transformação do viewport.
-O workflow do GitHub Actions executa as três suítes em Fedora.
+O workflow do GitHub Actions compila o aplicativo e executa as três suítes em
+Fedora 45, Ubuntu 26.04 LTS e Windows Server 2025 (x64). O job do Windows usa
+MSVC 2022, Qt 6.8.3 e os pacotes DCMTK e GoogleTest do vcpkg.
 
 Para incluir a mamografia do enunciado na validação, indique a cópia local:
 

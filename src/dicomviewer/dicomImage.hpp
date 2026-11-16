@@ -3,15 +3,10 @@
 //--------------------------------------------
 
 #include "dicomviewer/error.hpp"
+#include "dicomviewer/frameContrast.hpp"
 #include "dicomviewer/metadata.hpp"
 #include "dicomviewer/renderedFrame.hpp"
 #include "dicomviewer/window.hpp"
-
-#include <dcmtk/config/osconfig.h>
-#include <dcmtk/dcmdata/dcfilefo.h>
-#include <dcmtk/dcmdata/dcdeftag.h>
-#include <dcmtk/dcmdata/dcvrus.h>
-#include <dcmtk/dcmimgle/dcmimage.h>
 
 #include <filesystem>
 #include <memory>
@@ -31,9 +26,11 @@ namespace DICOMViewer {
 		Image(Image&&) noexcept;
 		Image& operator=(Image&&) noexcept;
 
-		[[nodiscard]] const Metadata& metadata() const noexcept;
+		[[nodiscard]] const Metadata& metadata() const & noexcept;
+		const Metadata& metadata() const && = delete;
+		[[nodiscard]] FrameContrast contrastForFrame(unsigned long frame) const;
 		// A missing window means a stored VOI LUT is active or the image is RGB.
-		[[nodiscard]] std::optional<ContrastWindow> initialWindow() const noexcept;
+		[[nodiscard]] std::optional<ContrastWindow> initialWindow() const;
 
 		// A missing override restores the initial contrast.
 		[[nodiscard]] Result<RenderedFrame> render(
@@ -42,16 +39,7 @@ namespace DICOMViewer {
 		);
 
 	private:
-		struct ImageState {
-			DcmFileFormat file;
-			// DCMTK borrows the LUT data for the lifetime of the active transform.
-			DcmUnsignedShort fractionalLut{DcmTag(DCM_LUTData, EVR_US)};
-			std::unique_ptr<DicomImage> image;
-			Metadata metadata;
-			std::optional<ContrastWindow> initialWindow;
-			std::optional<unsigned long> initialLut;
-			unsigned long decodedFrame{};
-		};
+		struct ImageState;
 
 		explicit Image(std::unique_ptr<ImageState> imageState) noexcept;
 		std::unique_ptr<ImageState> state;

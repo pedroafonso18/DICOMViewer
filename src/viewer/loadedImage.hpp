@@ -4,17 +4,14 @@
 
 #include "dicomviewer/metadata.hpp"
 
-#include <QImage>
-
-#include <optional>
+#include "viewer/renderedImage.hpp"
 
 //--------------------------------------------
 
 namespace DICOMViewer {
 
 	struct LoadedImage {
-		QImage image;
-		std::optional<ContrastWindow> initialWindow;
+		RenderedImage frame;
 		Metadata metadata;
 	};
 

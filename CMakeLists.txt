@@ -2,10 +2,18 @@ cmake_minimum_required(VERSION 3.24)
 project(DicomViewer LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 find_package(DCMTK 3.6.9 CONFIG REQUIRED)
 
 add_library(dicom_core
     src/dicomviewer/dicomImage.cpp
+    src/dicomviewer/dicomBackingFile.cpp
     src/dicomviewer/renderedFrame.cpp
     src/dicomviewer/window.cpp
 )
@@ -25,7 +33,7 @@ if(DICOMVIEWER_BUILD_APP)
         src/viewer/imageViewport.cpp
         src/viewer/imageLoader.cpp
         src/viewer/metadataPanel.cpp
-        src/viewer/contrastSpinBox.cpp
+        src/viewer/contrastInput.cpp
     )
     target_link_libraries(dicom_viewer_ui PUBLIC dicom_core Qt6::Widgets PRIVATE Qt6::Concurrent)
     add_executable(dicom_viewer src/viewer/main.cpp)

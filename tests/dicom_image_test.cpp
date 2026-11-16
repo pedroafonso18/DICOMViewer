@@ -3,6 +3,8 @@
 #include <dcmtk/config/osconfig.h>
 #include <dcmtk/dcmdata/dctk.h>
 #include <dcmtk/dcmdata/dcrleerg.h>
+#include <dcmtk/dcmdata/dcpxitem.h>
+#include <dcmtk/dcmimgle/dcmimage.h>
 #include <dcmtk/dcmjpeg/djencode.h>
 #include <dcmtk/dcmjpeg/djrplol.h>
 #include <dcmtk/dcmjpeg/djrploss.h>
@@ -15,6 +17,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -41,15 +44,29 @@ namespace DICOMViewer {
 
 		static_assert(!ExposesPixelsOnRvalue<RenderedFrame>);
 
+		template<class Session>
+		concept ExposesMetadataOnRvalue = requires(Session&& image) { std::move(image).metadata(); };
+
+		static_assert(!ExposesMetadataOnRvalue<Image>);
+
 		class DicomImageTest : public testing::Test {
 		protected:
 			void SetUp() override
 			{
-				std::string pattern = (std::filesystem::temp_directory_path() / "dicomviewer-XXXXXX").string();
-				const char* created = mkdtemp(pattern.data());
-				ASSERT_NE(created, nullptr);
-				directory = created;
-				path = directory / "image.dcm";
+				const auto tempDirectory = std::filesystem::temp_directory_path();
+				std::random_device random;
+				constexpr int directoryAttempts = 16;
+				for (int attempt = 0; attempt < directoryAttempts; ++attempt) {
+					const auto candidate = tempDirectory / ("dicomviewer-" + std::to_string(random()));
+					std::error_code error;
+					if (std::filesystem::create_directory(candidate, error)) {
+						directory = candidate;
+						path = directory / "image.dcm";
+						return;
+					}
+					ASSERT_FALSE(error) << error.message();
+				}
+				FAIL() << "Could not reserve a unique temporary directory.";
 			}
 
 			//--------------------------------------------
@@ -520,6 +537,180 @@ namespace DICOMViewer {
 			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(result));
 			const std::uint8_t expected[]{0, 64, 128, maxDisplayValue};
 			EXPECT_TRUE(std::ranges::equal(std::get<RenderedFrame>(result).pixels(), expected));
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, DoesNotReadReplacementFileAsTheOpenImage)
+		{
+			ASSERT_NO_FATAL_FAILURE(writeImage("MONOCHROME2"));
+			DcmFileFormat file;
+			ASSERT_TRUE(file.loadFile(OFFilename(path.c_str())).good());
+			auto& dataset = *file.getDataset();
+			constexpr Uint16 largeFrameSide = 64;
+			constexpr auto largeFramePixels = largeFrameSide * largeFrameSide;
+			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_Rows, largeFrameSide).good());
+			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_Columns, largeFrameSide).good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_NumberOfFrames, "2").good());
+			constexpr auto frameCount = 2;
+			constexpr Uint16 originalPixel = 64;
+			constexpr Uint16 substitutePixel = 128;
+			std::vector<Uint16> pixels(largeFramePixels * frameCount, originalPixel);
+			ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_PixelData, pixels.data(), pixels.size()).good());
+			ASSERT_TRUE(file.saveFile(OFFilename(path.c_str()), EXS_LittleEndianExplicit).good());
+			auto opened = Image::open(path);
+			ASSERT_TRUE(std::holds_alternative<Image>(opened));
+			auto& image = std::get<Image>(opened);
+			std::ranges::fill(pixels, substitutePixel);
+			ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_PixelData, pixels.data(), pixels.size()).good());
+			const auto substitute = path.parent_path() / "substitute.dcm";
+			ASSERT_TRUE(file.saveFile(OFFilename(substitute.c_str()), EXS_LittleEndianExplicit).good());
+			ASSERT_EQ(std::filesystem::file_size(path), std::filesystem::file_size(substitute));
+			std::filesystem::rename(substitute, path);
+
+			const auto frame = image.render(1);
+			if (const auto* result = std::get_if<RenderedFrame>(&frame)) {
+				EXPECT_EQ(result->pixels().front(), originalPixel);
+			} else {
+				EXPECT_EQ(std::get<Error>(frame).code, ErrorCode::FileAccess);
+			}
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, PreservesLinearExactMidpointAtNarrowWidth)
+		{
+			ASSERT_NO_FATAL_FAILURE(writeImage("MONOCHROME2"));
+			auto opened = Image::open(path);
+			ASSERT_TRUE(std::holds_alternative<Image>(opened));
+			constexpr double narrowWidth = 1e-17;
+			constexpr double level = 64;
+			const auto rendered = std::get<Image>(opened).render(
+				firstFrameIndex, ContrastWindow{level, narrowWidth, VoiFunction::LinearExact});
+			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(rendered));
+			EXPECT_NEAR(std::get<RenderedFrame>(rendered).pixels()[1], 127.5, 1.0);
+
+			constexpr ContrastWindow offCenter{64.125, 0.5, VoiFunction::LinearExact};
+			const auto shifted = std::get<Image>(opened).render(firstFrameIndex, offCenter);
+			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(shifted));
+			EXPECT_NEAR(std::get<RenderedFrame>(shifted).pixels()[1], 63.75, 1.0);
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, UsesPerFrameVoiUntilManuallyOverridden)
+		{
+			ASSERT_NO_FATAL_FAILURE(writeImage("MONOCHROME2"));
+			DcmFileFormat file;
+			ASSERT_TRUE(file.loadFile(OFFilename(path.c_str())).good());
+			auto& dataset = *file.getDataset();
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_SOPClassUID, UID_EnhancedMRImageStorage).good());
+			ASSERT_TRUE(dataset.findAndDeleteElement(DCM_WindowCenter).good());
+			ASSERT_TRUE(dataset.findAndDeleteElement(DCM_WindowWidth).good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_NumberOfFrames, "2").good());
+			const Uint16 pixels[]{0, 64, 128, 255, 0, 64, 128, 255};
+			ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_PixelData, pixels, std::size(pixels)).good());
+			for (long index = 0; index < 2; ++index) {
+				DcmItem* group = nullptr;
+				DcmItem* voi = nullptr;
+				ASSERT_TRUE(dataset.findOrCreateSequenceItem(DCM_PerFrameFunctionalGroupsSequence, group, index).good());
+				ASSERT_TRUE(group->findOrCreateSequenceItem(DCM_FrameVOILUTSequence, voi).good());
+				ASSERT_TRUE(voi->putAndInsertString(DCM_WindowCenter, index == 0 ? "64" : "128").good());
+				ASSERT_TRUE(voi->putAndInsertString(DCM_WindowWidth, "128").good());
+			}
+			ASSERT_TRUE(file.saveFile(OFFilename(path.c_str()), EXS_LittleEndianExplicit).good());
+			auto opened = Image::open(path);
+			ASSERT_TRUE(std::holds_alternative<Image>(opened));
+			auto& image = std::get<Image>(opened);
+			const auto first = image.render(0);
+			const auto second = image.render(1);
+			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(first));
+			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(second));
+			EXPECT_NEAR(std::get<RenderedFrame>(first).pixels()[1], 128, 1);
+			EXPECT_EQ(std::get<RenderedFrame>(second).pixels()[1], 0);
+			EXPECT_EQ(image.initialWindow()->windowLevel, 64.0);
+			EXPECT_EQ(image.contrastForFrame(1).defaultWindow->windowLevel, 128.0);
+			const auto manual = image.render(1, ContrastWindow{64.0, 128.0});
+			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(manual));
+			EXPECT_NEAR(std::get<RenderedFrame>(manual).pixels()[1], 128, 1);
+
+			ASSERT_TRUE(dataset.findAndDeleteElement(DCM_PerFrameFunctionalGroupsSequence).good());
+			DcmItem* shared = nullptr;
+			DcmItem* sharedVoi = nullptr;
+			ASSERT_TRUE(dataset.findOrCreateSequenceItem(DCM_SharedFunctionalGroupsSequence, shared).good());
+			ASSERT_TRUE(shared->findOrCreateSequenceItem(DCM_FrameVOILUTSequence, sharedVoi).good());
+			ASSERT_TRUE(sharedVoi->putAndInsertString(DCM_WindowCenter, "64").good());
+			ASSERT_TRUE(sharedVoi->putAndInsertString(DCM_WindowWidth, "128").good());
+			const auto sharedPath = path.parent_path() / "shared-window.dcm";
+			ASSERT_TRUE(file.saveFile(OFFilename(sharedPath.c_str()), EXS_LittleEndianExplicit).good());
+			auto sharedOpened = Image::open(sharedPath);
+			ASSERT_TRUE(std::holds_alternative<Image>(sharedOpened));
+			const auto sharedSecond = std::get<Image>(sharedOpened).render(1);
+			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(sharedSecond));
+			EXPECT_NEAR(std::get<RenderedFrame>(sharedSecond).pixels()[1], 128, 1);
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, NavigatesFragmentedJpegWithEmptyOffsetTable)
+		{
+			ASSERT_NO_FATAL_FAILURE(writeImage("MONOCHROME2"));
+			DcmFileFormat file;
+			ASSERT_TRUE(file.loadFile(OFFilename(path.c_str())).good());
+			auto& dataset = *file.getDataset();
+			constexpr Uint16 largeFrameSide = 64;
+			constexpr auto largeFramePixels = largeFrameSide * largeFrameSide;
+			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_Rows, largeFrameSide).good());
+			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_Columns, largeFrameSide).good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_NumberOfFrames, "3").good());
+			constexpr unsigned long frameCount = 3;
+			constexpr auto randomSeed = 12;
+			constexpr auto maxStoredValue = (1U << fixtureBitsStored) - 1;
+			std::mt19937 random(randomSeed);
+			std::vector<Uint16> pixels(largeFramePixels * frameCount);
+			for (auto& sample : pixels) {
+				sample = random() & maxStoredValue;
+			}
+			constexpr Uint16 firstPixelByFrame[]{11, 73, 142};
+			for (unsigned long index = 0; index < frameCount; ++index) {
+				pixels[index * largeFramePixels] = firstPixelByFrame[index];
+			}
+			ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_PixelData, pixels.data(), pixels.size()).good());
+			constexpr int noSmoothing = 0;
+			constexpr int sourceBitDepth = 0;
+			constexpr Uint32 fragmentSizeKiB = 1;
+			constexpr OFBool createOffsetTable = OFFalse;
+			DJEncoderRegistration::registerCodecs(ECC_lossyYCbCr, EUC_default, OFFalse,
+				noSmoothing, sourceBitDepth, fragmentSizeKiB, createOffsetTable);
+			const DJ_RPLossless parameters(jpegFirstOrderPrediction, jpegNoPointTransform);
+			const auto encoded = dataset.chooseRepresentation(EXS_JPEGProcess14SV1, &parameters);
+			DJEncoderRegistration::cleanup();
+			ASSERT_TRUE(encoded.good()) << encoded.text();
+			DcmElement* element = nullptr;
+			ASSERT_TRUE(dataset.findAndGetElement(DCM_PixelData, element).good());
+			DcmPixelSequence* sequence = nullptr;
+			ASSERT_TRUE(static_cast<DcmPixelData*>(element)->getEncapsulatedRepresentation(
+				EXS_JPEGProcess14SV1, &parameters, sequence).good());
+			constexpr unsigned long offsetTableItems = 1;
+			ASSERT_GT(sequence->card(), frameCount + offsetTableItems);
+			DcmPixelItem* offsetTable = nullptr;
+			ASSERT_TRUE(sequence->getItem(offsetTable, 0).good());
+			ASSERT_EQ(offsetTable->getLengthField(), 0);
+			ASSERT_TRUE(file.saveFile(OFFilename(path.c_str()), EXS_JPEGProcess14SV1).good());
+			auto opened = Image::open(path);
+			if (const auto* error = std::get_if<Error>(&opened)) {
+				FAIL() << error->detail;
+			}
+			auto& image = std::get<Image>(opened);
+			constexpr unsigned long navigationOrder[]{1, 2, 0, 2, 1};
+			for (const auto index : navigationOrder) {
+				SCOPED_TRACE(index);
+				const auto frame = image.render(index);
+				if (const auto* error = std::get_if<Error>(&frame)) {
+					FAIL() << error->detail;
+				}
+				EXPECT_EQ(std::get<RenderedFrame>(frame).pixels().front(), firstPixelByFrame[index]);
+			}
 		}
 
 		//--------------------------------------------

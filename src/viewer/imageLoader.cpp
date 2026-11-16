@@ -10,7 +10,7 @@
 namespace DICOMViewer {
 	namespace {
 
-		Result<QImage> renderImage(Image& session, const FrameRequest& request)
+		Result<RenderedImage> renderImage(Image& session, const FrameRequest& request)
 		{
 			auto rendered = session.render(request.index, request.window);
 			if (auto* error = std::get_if<Error>(&rendered)) {
@@ -39,7 +39,7 @@ namespace DICOMViewer {
 				std::copy_n(row, rowBytes, image.scanLine(y));
 				row += rowBytes;
 			}
-			return image;
+			return RenderedImage{std::move(image), session.contrastForFrame(request.index)};
 		}
 
 	} // namespace
@@ -59,7 +59,7 @@ namespace DICOMViewer {
 			return std::move(*error);
 		}
 
-		LoadedImage snapshot{std::get<QImage>(std::move(rendered)), session.initialWindow(), session.metadata()};
+		LoadedImage snapshot{std::get<RenderedImage>(std::move(rendered)), session.metadata()};
 		currentSession.emplace(std::move(session));
 		return snapshot;
 	}
@@ -69,7 +69,7 @@ namespace DICOMViewer {
 
 	//--------------------------------------------
 
-	Result<QImage> ImageLoader::render(const FrameRequest& request) try
+	Result<RenderedImage> ImageLoader::render(const FrameRequest& request) try
 	{
 		if (!currentSession) {
 			return Error{ErrorCode::RenderFailed, "No DICOM session is open."};

@@ -1,6 +1,12 @@
 #include "dicomviewer/dicomImage.hpp"
 
+#include "dicomviewer/dicomBackingFile.hpp"
+
+#include <dcmtk/config/osconfig.h>
 #include <dcmtk/dcmdata/dctk.h>
+#include <dcmtk/dcmdata/dcpixseq.h>
+#include <dcmtk/dcmdata/dcpxitem.h>
+#include <dcmtk/dcmimgle/dcmimage.h>
 #include <dcmtk/dcmdata/dccodec.h>
 #include <dcmtk/dcmdata/dcrledrg.h>
 #include <dcmtk/dcmimage/diregist.h>
@@ -11,7 +17,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <fstream>
 #include <iterator>
 #include <utility>
 
@@ -71,13 +76,16 @@ namespace DICOMViewer {
 		//--------------------------------------------
 
 		std::vector<ContrastWindow> readWindows(
-			DcmDataset& dataset, VoiFunction function
+			DcmItem& item
 		)
 		{
+			const auto functionName = readTag(item, DCM_VOILUTFunction);
+			const auto function = functionName == "SIGMOID" ? VoiFunction::Sigmoid
+				: functionName == "LINEAR_EXACT" ? VoiFunction::LinearExact : VoiFunction::Linear;
 			DcmElement* centers = nullptr;
 			DcmElement* widths = nullptr;
-			if (dataset.findAndGetElement(DCM_WindowCenter, centers).bad() ||
-				dataset.findAndGetElement(DCM_WindowWidth, widths).bad()) {
+			if (item.findAndGetElement(DCM_WindowCenter, centers).bad() ||
+				item.findAndGetElement(DCM_WindowWidth, widths).bad()) {
 				return {};
 			}
 
@@ -98,22 +106,48 @@ namespace DICOMViewer {
 
 		//--------------------------------------------
 
-		std::optional<Error> loadDicomFile(
-			const std::filesystem::path& path,
-			DcmFileFormat& file
-		)
+		std::vector<ContrastWindow> readFrameWindows(DcmDataset& dataset, unsigned long frame)
 		{
-			std::error_code filesystemError;
-			if (!std::filesystem::is_regular_file(path, filesystemError) ||
-				!std::ifstream(path, std::ios::binary)) {
-				return Error{ErrorCode::FileAccess, "Cannot read the input file."};
+			DcmItem* group = nullptr;
+			DcmItem* voi = nullptr;
+			if (dataset.findAndGetSequenceItem(DCM_PerFrameFunctionalGroupsSequence, group, frame).good() &&
+				group->findAndGetSequenceItem(DCM_FrameVOILUTSequence, voi).good()) {
+				auto windows = readWindows(*voi);
+				if (!windows.empty()) {
+					return windows;
+				}
 			}
+			if (dataset.findAndGetSequenceItem(DCM_SharedFunctionalGroupsSequence, group).good() &&
+				group->findAndGetSequenceItem(DCM_FrameVOILUTSequence, voi).good()) {
+				return readWindows(*voi);
+			}
+			return {};
+		}
 
-			const OFCondition loaded = file.loadFile(OFFilename(path.c_str()));
-			if (loaded.bad()) {
-				return Error{ErrorCode::InvalidDicom, loaded.text()};
+		//--------------------------------------------
+
+		bool requiresSequentialDecode(DcmDataset& dataset, unsigned long frameCount)
+		{
+			if (!DcmXfer(dataset.getOriginalXfer()).usesEncapsulatedFormat()) {
+				return false;
 			}
-			return std::nullopt;
+			DcmElement* element = nullptr;
+			if (dataset.findAndGetElement(DCM_PixelData, element).bad()) {
+				return false;
+			}
+			auto* pixels = dynamic_cast<DcmPixelData*>(element);
+			if (!pixels) {
+				return false;
+			}
+			E_TransferSyntax syntax{};
+			const DcmRepresentationParameter* parameters = nullptr;
+			pixels->getOriginalRepresentationKey(syntax, parameters);
+			DcmPixelSequence* sequence = nullptr;
+			DcmPixelItem* offsets = nullptr;
+			constexpr unsigned long offsetTableItems = 1;
+			return pixels->getEncapsulatedRepresentation(syntax, parameters, sequence).good() &&
+				sequence->card() > frameCount + offsetTableItems &&
+				sequence->getItem(offsets, 0).good() && offsets->getLengthField() == 0;
 		}
 
 		//--------------------------------------------
@@ -246,10 +280,7 @@ namespace DICOMViewer {
 			if (metadata.pixelFormat == PixelFormat::Rgb8) {
 				return;
 			}
-			const auto function = readTag(dataset, DCM_VOILUTFunction);
-			const auto voi = function == "SIGMOID" ? VoiFunction::Sigmoid
-				: function == "LINEAR_EXACT" ? VoiFunction::LinearExact : VoiFunction::Linear;
-			metadata.windows = readWindows(dataset, voi);
+			metadata.windows = readWindows(dataset);
 		}
 
 		//--------------------------------------------
@@ -317,6 +348,16 @@ namespace DICOMViewer {
 			image.setVoiLutFunction(window.function == VoiFunction::Sigmoid ? EFV_Sigmoid : EFV_Linear);
 			if (window.function == VoiFunction::LinearExact) {
 				// LINEAR uses center - 0.5 and width - 1 in its interpolation.
+				if (window.width <= ContrastWindow::minimumLinearWidth) {
+					// DCMTK's intermediate pixels are integral. At most one input
+					// value is inside this window. Use a unit slope through the
+					// correct output of that value, keeping its neighbors clipped.
+					const double pivot = std::round(window.windowLevel);
+					const double value = std::clamp(
+						(pivot - window.windowLevel) / window.width + linearWindowCenterOffset, 0.0, 1.0);
+					constexpr double unitSlopeLinearWidth = linearWindowWidthOffset + 1.0;
+					return image.setWindow(pivot + (1.0 - value), unitSlopeLinearWidth);
+				}
 				return image.setWindow(window.windowLevel + linearWindowCenterOffset,
 					window.width + linearWindowWidthOffset);
 			}
@@ -324,6 +365,58 @@ namespace DICOMViewer {
 		}
 
 	}
+
+	struct Image::ImageState {
+		DicomBackingFile backing;
+		DcmFileFormat file;
+		// DCMTK borrows the LUT data for the lifetime of the active transform.
+		DcmUnsignedShort fractionalLut{DcmTag(DCM_LUTData, EVR_US)};
+		std::unique_ptr<DicomImage> image;
+		Metadata metadata;
+		std::optional<ContrastWindow> initialWindow;
+		std::optional<unsigned long> initialLut;
+		unsigned long decodedFrame{};
+		bool sequentialDecode{};
+
+		[[nodiscard]] std::optional<Error> selectFrame(unsigned long frame);
+	};
+
+	//--------------------------------------------
+
+	std::optional<Error> Image::ImageState::selectFrame(unsigned long frame)
+	{
+		if (image && frame == decodedFrame) {
+			return std::nullopt;
+		}
+
+		auto& dataset = *file.getDataset();
+		if (sequentialDecode) {
+			if (!image || frame < decodedFrame) {
+				image = decodeFrame(dataset, 0);
+				decodedFrame = 0;
+			}
+			while (image->getStatus() == EIS_Normal && decodedFrame < frame) {
+				if (!image->processNextFrames(framesPerDecode) || image->getFrameCount() != framesPerDecode) {
+					break;
+				}
+				++decodedFrame;
+			}
+			if (image->getStatus() != EIS_Normal || decodedFrame != frame) {
+				image.reset();
+				return Error{ErrorCode::RenderFailed, "Could not advance through the compressed frames."};
+			}
+		} else {
+			auto next = decodeFrame(dataset, frame);
+			if (next->getStatus() != EIS_Normal) {
+				return Error{ErrorCode::RenderFailed, DicomImage::getString(next->getStatus())};
+			}
+			image = std::move(next);
+			decodedFrame = frame;
+		}
+		return std::nullopt;
+	}
+
+	//--------------------------------------------
 
 	Image::Image(std::unique_ptr<ImageState> imageState) noexcept
 		: state(std::move(imageState))
@@ -344,16 +437,31 @@ namespace DICOMViewer {
 
 	//--------------------------------------------
 
-	const Metadata& Image::metadata() const noexcept
+	const Metadata& Image::metadata() const & noexcept
 	{
 		return state->metadata;
 	}
 
 	//--------------------------------------------
 
-	std::optional<ContrastWindow> Image::initialWindow() const noexcept
+	FrameContrast Image::contrastForFrame(unsigned long frame) const
 	{
-		return state->initialWindow;
+		if (state->metadata.pixelFormat == PixelFormat::Rgb8 || frame >= state->metadata.frameCount) {
+			return {};
+		}
+		auto presets = readFrameWindows(*state->file.getDataset(), frame);
+		if (!presets.empty()) {
+			const auto first = presets.front();
+			return {first, std::move(presets)};
+		}
+		return {state->initialWindow, state->metadata.windows};
+	}
+
+	//--------------------------------------------
+
+	std::optional<ContrastWindow> Image::initialWindow() const
+	{
+		return contrastForFrame(0).defaultWindow;
 	}
 
 	//--------------------------------------------
@@ -363,8 +471,12 @@ namespace DICOMViewer {
 		auto imageState = std::make_unique<ImageState>();
 		DcmFileFormat& file = imageState->file;
 		Metadata& metadata = imageState->metadata;
-		if (std::optional<Error> error = loadDicomFile(path, file)) {
+		if (auto error = imageState->backing.open(path)) {
 			return std::move(*error);
+		}
+		const auto loaded = file.loadFile(OFFilename(imageState->backing.readPath().c_str()));
+		if (loaded.bad()) {
+			return Error{ErrorCode::InvalidDicom, loaded.text()};
 		}
 		if (std::optional<Error> error = preparePixelData(file, metadata)) {
 			return std::move(*error);
@@ -372,10 +484,14 @@ namespace DICOMViewer {
 
 		DcmDataset& dataset = *file.getDataset();
 		readMetadata(dataset, metadata);
+		imageState->sequentialDecode = requiresSequentialDecode(dataset, metadata.frameCount);
 		imageState->image = decodeFrame(dataset, 0);
 		auto& image = *imageState->image;
 		if (image.getStatus() != EIS_Normal) {
 			return Error{ErrorCode::RenderFailed, DicomImage::getString(image.getStatus())};
+		}
+		if (auto error = imageState->backing.checkUnchanged()) {
+			return std::move(*error);
 		}
 		metadata.width = image.getWidth();
 		metadata.height = image.getHeight();
@@ -425,17 +541,15 @@ namespace DICOMViewer {
 		if (window && state->metadata.pixelFormat == PixelFormat::Rgb8) {
 			return Error{ErrorCode::InvalidWindow, "Window Level and Width apply to monochrome images only."};
 		}
-		const auto selected = window ? window : state->initialWindow;
+		if (auto error = state->backing.checkUnchanged()) {
+			return std::move(*error);
+		}
+		const auto selected = window ? window : contrastForFrame(frame).defaultWindow;
 		if (selected && !selected->isValid()) {
 			return Error{ErrorCode::InvalidWindow, "Window level or width is invalid for this VOI function."};
 		}
-		if (frame != state->decodedFrame) {
-			auto next = decodeFrame(*state->file.getDataset(), frame);
-			if (next->getStatus() != EIS_Normal) {
-				return Error{ErrorCode::RenderFailed, DicomImage::getString(next->getStatus())};
-			}
-			state->image = std::move(next);
-			state->decodedFrame = frame;
+		if (auto error = state->selectFrame(frame)) {
+			return std::move(*error);
 		}
 
 		DicomImage& image = *state->image;
@@ -455,6 +569,9 @@ namespace DICOMViewer {
 		std::vector<std::uint8_t> pixels(outputSize);
 		if (!image.getOutputData(pixels.data(), outputSize, outputBits, decodedFrameIndex)) {
 			return Error{ErrorCode::RenderFailed, "DCMTK could not render the requested frame."};
+		}
+		if (auto error = state->backing.checkUnchanged()) {
+			return std::move(*error);
 		}
 		return RenderedFrame{state->metadata.width, state->metadata.height, state->metadata.pixelFormat, std::move(pixels)};
 	}
