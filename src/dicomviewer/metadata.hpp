@@ -2,6 +2,7 @@
 
 //--------------------------------------------
 
+#include "dicomviewer/pixelFormat.hpp"
 #include "dicomviewer/window.hpp"
 
 #include <string>
@@ -15,14 +16,17 @@ namespace DICOMViewer {
 		unsigned long width{};
 		unsigned long height{};
 		unsigned long frameCount{};
+		PixelFormat pixelFormat{PixelFormat::Grayscale8};
 		double pixelAspectRatio{1.0};
 		std::string modality;
 		std::string photometricInterpretation;
 		std::string orientation;
+		std::string imageOrientation;
 		std::string laterality;
 		std::string viewPosition;
 		std::string pixelSpacing;
 		std::string transferSyntax;
+		std::string transferSyntaxName;
 		unsigned int bitsStored{};
 		std::vector<ContrastWindow> windows;
 	};

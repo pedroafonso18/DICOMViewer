@@ -4,6 +4,7 @@
 
 #include "dicomviewer/dicomImage.hpp"
 #include "viewer/loadedImage.hpp"
+#include "viewer/frameRequest.hpp"
 
 #include <QString>
 
@@ -16,6 +17,7 @@ namespace DICOMViewer {
 	class ImageLoader {
 	public:
 		[[nodiscard]] Result<LoadedImage> load(const QString& filePath);
+		[[nodiscard]] Result<QImage> render(const FrameRequest& request);
 
 	private:
 		std::optional<Image> currentSession;

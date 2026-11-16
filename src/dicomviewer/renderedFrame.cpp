@@ -9,9 +9,10 @@ namespace DICOMViewer {
 	RenderedFrame::RenderedFrame(
 		unsigned long width,
 		unsigned long height,
+		PixelFormat format,
 		std::vector<std::uint8_t> pixels
 	) noexcept
-		: frameWidth(width), frameHeight(height), pixelData(std::move(pixels))
+		: frameWidth(width), frameHeight(height), pixelFormat(format), pixelData(std::move(pixels))
 	{
 	}
 
@@ -27,6 +28,13 @@ namespace DICOMViewer {
 	unsigned long RenderedFrame::height() const noexcept
 	{
 		return frameHeight;
+	}
+
+	//--------------------------------------------
+
+	PixelFormat RenderedFrame::format() const noexcept
+	{
+		return pixelFormat;
 	}
 
 	//--------------------------------------------

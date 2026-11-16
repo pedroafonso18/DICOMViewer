@@ -2,8 +2,12 @@
 
 #include <dcmtk/config/osconfig.h>
 #include <dcmtk/dcmdata/dctk.h>
+#include <dcmtk/dcmdata/dcrleerg.h>
 #include <dcmtk/dcmjpeg/djencode.h>
 #include <dcmtk/dcmjpeg/djrplol.h>
+#include <dcmtk/dcmjpeg/djrploss.h>
+#include <dcmtk/dcmjpls/djencode.h>
+#include <dcmtk/dcmjpls/djrparam.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -12,6 +16,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 
 //--------------------------------------------
@@ -314,6 +319,207 @@ namespace DICOMViewer {
 			const auto rendered = image.render();
 			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(rendered));
 			EXPECT_TRUE(std::ranges::equal(std::get<RenderedFrame>(rendered).pixels(), expected));
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, RendersInterleavedAndPlanarRgbFrames)
+		{
+			constexpr Uint16 colorByPixel = 0;
+			constexpr Uint16 colorByPlane = 1;
+			constexpr unsigned long secondFrameIndex = 1;
+			constexpr unsigned long rgbFrameCount = 2;
+			constexpr auto rgbChannels = channelCount(PixelFormat::Rgb8);
+			constexpr Uint8 black = 0;
+			constexpr Uint8 full = std::numeric_limits<Uint8>::max();
+			const Uint8 interleaved[] = {full, black, black, black, full, black, black, black, full, full, full, full};
+			const Uint8 planar[] = {full, black, black, full, black, full, black, full, black, black, full, full};
+			static_assert(std::size(interleaved) == rgbChannels * pixelsPerFixtureFrame);
+
+			for (const auto layout : {colorByPixel, colorByPlane}) {
+				SCOPED_TRACE(layout);
+				ASSERT_NO_FATAL_FAILURE(writeImage("RGB", false));
+				DcmFileFormat file;
+				ASSERT_TRUE(file.loadFile(OFFilename(path.c_str())).good());
+				auto& dataset = *file.getDataset();
+				ASSERT_TRUE(dataset.putAndInsertString(DCM_SOPClassUID,
+					UID_MultiframeTrueColorSecondaryCaptureImageStorage).good());
+				ASSERT_TRUE(dataset.putAndInsertString(DCM_NumberOfFrames, std::to_string(rgbFrameCount).c_str()).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_SamplesPerPixel, rgbChannels).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_PlanarConfiguration, layout).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_BitsAllocated, displayBits).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_BitsStored, displayBits).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_HighBit, displayBits - 1).good());
+				const auto& pixels = layout == colorByPixel ? interleaved : planar;
+				std::vector<Uint8> bothFrames(std::begin(pixels), std::end(pixels));
+				bothFrames.insert(bothFrames.end(), std::rbegin(pixels), std::rend(pixels));
+				ASSERT_TRUE(dataset.putAndInsertUint8Array(DCM_PixelData, bothFrames.data(), bothFrames.size()).good());
+				ASSERT_TRUE(file.saveFile(OFFilename(path.c_str()), EXS_LittleEndianExplicit).good());
+
+				auto opened = Image::open(path);
+				ASSERT_TRUE(std::holds_alternative<Image>(opened));
+				auto& image = std::get<Image>(opened);
+				EXPECT_EQ(image.metadata().pixelFormat, PixelFormat::Rgb8);
+				EXPECT_EQ(image.metadata().frameCount, rgbFrameCount);
+				EXPECT_FALSE(image.initialWindow());
+				const auto rendered = image.render();
+				ASSERT_TRUE(std::holds_alternative<RenderedFrame>(rendered));
+				const auto& frame = std::get<RenderedFrame>(rendered);
+				EXPECT_EQ(frame.format(), PixelFormat::Rgb8);
+				EXPECT_TRUE(std::ranges::equal(frame.pixels(), interleaved));
+				const auto second = image.render(secondFrameIndex);
+				ASSERT_TRUE(std::holds_alternative<RenderedFrame>(second));
+				EXPECT_TRUE(std::ranges::equal(std::get<RenderedFrame>(second).pixels().begin(),
+					std::get<RenderedFrame>(second).pixels().end(), std::rbegin(interleaved), std::rend(interleaved)));
+			}
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, ResolvesPaletteIndicesInNativeAndRleImages)
+		{
+			constexpr Uint16 full = std::numeric_limits<Uint16>::max();
+			constexpr Uint16 firstPaletteIndex = 0;
+			constexpr auto paletteEntryBits = std::numeric_limits<Uint16>::digits;
+			const Uint16 red[] = {full, 0, 0, full};
+			const Uint16 green[] = {0, full, 0, full};
+			const Uint16 blue[] = {0, 0, full, full};
+			const Uint16 descriptor[] = {std::size(red), firstPaletteIndex, paletteEntryBits};
+			const Uint16 indices[] = {0, 1, 2, 3};
+			const std::uint8_t expected[] = {
+				maxDisplayValue, 0, 0, 0, maxDisplayValue, 0, 0, 0, maxDisplayValue,
+				maxDisplayValue, maxDisplayValue, maxDisplayValue};
+
+			for (const auto syntax : {EXS_LittleEndianExplicit, EXS_RLELossless}) {
+				SCOPED_TRACE(syntax);
+				ASSERT_NO_FATAL_FAILURE(writeImage("PALETTE COLOR", false));
+				DcmFileFormat file;
+				ASSERT_TRUE(file.loadFile(OFFilename(path.c_str())).good());
+				auto& dataset = *file.getDataset();
+				for (const auto& tag : {DCM_RedPaletteColorLookupTableDescriptor,
+					DCM_GreenPaletteColorLookupTableDescriptor, DCM_BluePaletteColorLookupTableDescriptor}) {
+					ASSERT_TRUE(dataset.putAndInsertUint16Array(DcmTag(tag, EVR_US),
+						descriptor, std::size(descriptor)).good());
+				}
+				ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_RedPaletteColorLookupTableData, red, std::size(red)).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_GreenPaletteColorLookupTableData, green, std::size(green)).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_BluePaletteColorLookupTableData, blue, std::size(blue)).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16Array(DCM_PixelData, indices, std::size(indices)).good());
+				if (syntax == EXS_RLELossless) {
+					DcmRLEEncoderRegistration::registerCodecs();
+					const auto encoded = dataset.chooseRepresentation(syntax, nullptr);
+					DcmRLEEncoderRegistration::cleanup();
+					ASSERT_TRUE(encoded.good()) << encoded.text();
+				}
+				ASSERT_TRUE(file.saveFile(OFFilename(path.c_str()), syntax).good());
+
+				auto opened = Image::open(path);
+				if (const auto* error = std::get_if<Error>(&opened)) {
+					FAIL() << error->detail;
+				}
+				auto& image = std::get<Image>(opened);
+				EXPECT_EQ(image.metadata().photometricInterpretation, "PALETTE COLOR");
+				EXPECT_EQ(image.metadata().pixelFormat, PixelFormat::Rgb8);
+				EXPECT_FALSE(image.initialWindow().has_value());
+				const auto result = image.render();
+				ASSERT_TRUE(std::holds_alternative<RenderedFrame>(result));
+				const auto& frame = std::get<RenderedFrame>(result);
+				EXPECT_TRUE(std::ranges::equal(frame.pixels(), expected));
+			}
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, RendersYbrAsRgb)
+		{
+			constexpr auto rgbChannels = channelCount(PixelFormat::Rgb8);
+			constexpr Uint16 colorByPixel = 0;
+			constexpr Uint8 y = 76;
+			constexpr Uint8 cb = 85;
+			constexpr Uint8 cr = maxDisplayValue;
+			const Uint8 ybrFull[] = {y, cb, cr, y, cb, cr, y, cb, cr, y, cb, cr};
+			const Uint8 ybr422[] = {y, y, cb, cr, y, y, cb, cr};
+			const Uint8 rgbRed[] = {cr, 0, 0, cr, 0, 0, cr, 0, 0, cr, 0, 0};
+			// Studio-range YCbCr representation of red.
+			const Uint8 ybrPartial422[] = {81, 81, 90, 240, 81, 81, 90, 240};
+
+			for (const std::string_view format : {"YBR_FULL", "YBR_FULL_422", "YBR_PARTIAL_422", "RGB"}) {
+				SCOPED_TRACE(format);
+				const bool compress = format == "RGB";
+				ASSERT_NO_FATAL_FAILURE(writeImage(format.data(), false));
+				DcmFileFormat file;
+				ASSERT_TRUE(file.loadFile(OFFilename(path.c_str())).good());
+				auto& dataset = *file.getDataset();
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_SamplesPerPixel, rgbChannels).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_PlanarConfiguration, colorByPixel).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_BitsAllocated, displayBits).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_BitsStored, displayBits).good());
+				ASSERT_TRUE(dataset.putAndInsertUint16(DCM_HighBit, displayBits - 1).good());
+				std::span<const Uint8> source = ybrFull;
+				if (format == "YBR_FULL_422") {
+					source = ybr422;
+				} else if (format == "YBR_PARTIAL_422") {
+					source = ybrPartial422;
+				} else if (compress) {
+					source = rgbRed;
+				}
+				ASSERT_TRUE(dataset.putAndInsertUint8Array(DCM_PixelData, source.data(), source.size()).good());
+
+				auto syntax = EXS_LittleEndianExplicit;
+				if (compress) {
+					DJEncoderRegistration::registerCodecs();
+					const DJ_RPLossy parameters;
+					syntax = EXS_JPEGProcess1;
+					const auto encoded = dataset.chooseRepresentation(syntax, &parameters);
+					DJEncoderRegistration::cleanup();
+					ASSERT_TRUE(encoded.good()) << encoded.text();
+				}
+				ASSERT_TRUE(file.saveFile(OFFilename(path.c_str()), syntax).good());
+
+				auto opened = Image::open(path);
+				if (const auto* error = std::get_if<Error>(&opened)) {
+					FAIL() << error->detail;
+				}
+				auto& image = std::get<Image>(opened);
+				EXPECT_EQ(image.metadata().photometricInterpretation, compress ? "YBR_FULL_422" : format);
+				EXPECT_FALSE(image.initialWindow().has_value());
+				const auto result = image.render();
+				ASSERT_TRUE(std::holds_alternative<RenderedFrame>(result));
+				const auto& frame = std::get<RenderedFrame>(result);
+				ASSERT_EQ(frame.format(), PixelFormat::Rgb8);
+				const auto pixels = frame.pixels();
+				ASSERT_EQ(pixels.size(), pixelsPerFixtureFrame * rgbChannels);
+				constexpr int colorConversionTolerance = 4;
+				for (std::size_t index = 0; index < pixels.size(); ++index) {
+					EXPECT_NEAR(pixels[index], rgbRed[index], colorConversionTolerance);
+				}
+			}
+		}
+
+		//--------------------------------------------
+
+		TEST_F(DicomImageTest, DecodesJpegLsLossless)
+		{
+			ASSERT_NO_FATAL_FAILURE(writeImage("MONOCHROME2", true, false, "128"));
+			DcmFileFormat file;
+			ASSERT_TRUE(file.loadFile(OFFilename(path.c_str())).good());
+			DJLSEncoderRegistration::registerCodecs();
+			const DJLSRepresentationParameter parameters;
+			const auto encoded = file.getDataset()->chooseRepresentation(EXS_JPEGLSLossless, &parameters);
+			DJLSEncoderRegistration::cleanup();
+			ASSERT_TRUE(encoded.good()) << encoded.text();
+			ASSERT_TRUE(file.saveFile(OFFilename(path.c_str()), EXS_JPEGLSLossless).good());
+
+			auto opened = Image::open(path);
+			if (const auto* error = std::get_if<Error>(&opened)) {
+				FAIL() << error->detail;
+			}
+			auto& image = std::get<Image>(opened);
+			EXPECT_EQ(image.metadata().transferSyntax, UID_JPEGLSLosslessTransferSyntax);
+			const auto result = image.render();
+			ASSERT_TRUE(std::holds_alternative<RenderedFrame>(result));
+			const std::uint8_t expected[]{0, 64, 128, maxDisplayValue};
+			EXPECT_TRUE(std::ranges::equal(std::get<RenderedFrame>(result).pixels(), expected));
 		}
 
 		//--------------------------------------------

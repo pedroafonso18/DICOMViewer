@@ -13,7 +13,7 @@ target_compile_features(dicom_core PUBLIC cxx_std_20)
 target_include_directories(dicom_core PUBLIC src)
 target_link_libraries(dicom_core
     PUBLIC DCMTK::dcmdata DCMTK::dcmimgle
-    PRIVATE DCMTK::dcmjpeg
+    PRIVATE DCMTK::dcmimage DCMTK::dcmjpeg DCMTK::dcmjpls
 )
 
 include(CTest)
@@ -24,6 +24,8 @@ if(DICOMVIEWER_BUILD_APP)
         src/viewer/mainWindow.cpp
         src/viewer/imageViewport.cpp
         src/viewer/imageLoader.cpp
+        src/viewer/metadataPanel.cpp
+        src/viewer/contrastSpinBox.cpp
     )
     target_link_libraries(dicom_viewer_ui PUBLIC dicom_core Qt6::Widgets PRIVATE Qt6::Concurrent)
     add_executable(dicom_viewer src/viewer/main.cpp)

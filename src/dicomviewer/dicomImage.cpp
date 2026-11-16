@@ -2,8 +2,11 @@
 
 #include <dcmtk/dcmdata/dctk.h>
 #include <dcmtk/dcmdata/dccodec.h>
+#include <dcmtk/dcmdata/dcrledrg.h>
+#include <dcmtk/dcmimage/diregist.h>
 #include <dcmtk/dcmimgle/dipixel.h>
 #include <dcmtk/dcmjpeg/djdecode.h>
+#include <dcmtk/dcmjpls/djdecode.h>
 
 #include <algorithm>
 #include <cmath>
@@ -17,8 +20,8 @@
 namespace DICOMViewer {
 	namespace {
 
-		constexpr Uint16 monochromeSamplesPerPixel = 1;
 		constexpr Uint16 packedBitsPerPixel = 1;
+		constexpr Uint16 singleSamplePerPixel = 1;
 		constexpr auto bitsPerByte = std::numeric_limits<std::uint8_t>::digits;
 		constexpr auto maxBitsAllocated = std::numeric_limits<Uint32>::digits;
 		constexpr std::uint64_t pixelDataAlignmentBytes = 2;
@@ -40,10 +43,12 @@ namespace DICOMViewer {
 
 		//--------------------------------------------
 
-		void registerJpegDecoders()
+		void registerPixelDecoders()
 		{
 			static const bool registered = [] {
 				DJDecoderRegistration::registerCodecs();
+				DcmRLEDecoderRegistration::registerCodecs();
+				DJLSDecoderRegistration::registerCodecs();
 				return true;
 			}();
 			static_cast<void>(registered);
@@ -126,34 +131,46 @@ namespace DICOMViewer {
 			if (metadata.photometricInterpretation.empty()) {
 				return Error{ErrorCode::InvalidDicom, "Photometric Interpretation is missing."};
 			}
-			if (metadata.photometricInterpretation != "MONOCHROME1" &&
+			const bool isYbr422 = metadata.photometricInterpretation == "YBR_FULL_422" ||
+				metadata.photometricInterpretation == "YBR_PARTIAL_422";
+			const bool hasThreeColorSamples = metadata.photometricInterpretation == "RGB" ||
+				metadata.photometricInterpretation == "YBR_FULL" || isYbr422;
+			if (hasThreeColorSamples || metadata.photometricInterpretation == "PALETTE COLOR") {
+				metadata.pixelFormat = PixelFormat::Rgb8;
+			} else if (metadata.photometricInterpretation != "MONOCHROME1" &&
 				metadata.photometricInterpretation != "MONOCHROME2") {
 				return Error{ErrorCode::UnsupportedPhotometricInterpretation,
 							 metadata.photometricInterpretation};
 			}
 
 			const E_TransferSyntax originalSyntax = dataset.getOriginalXfer();
+			const DcmXfer syntax(originalSyntax);
+			if (const char* name = syntax.getXferName()) {
+				metadata.transferSyntaxName = name;
+			}
 			metadata.transferSyntax = readTag(*file.getMetaInfo(), DCM_TransferSyntaxUID);
 			if (metadata.transferSyntax.empty()) {
-				const char* uid = DcmXfer(originalSyntax).getXferID();
+				const char* uid = syntax.getXferID();
 				if (uid) {
 					metadata.transferSyntax = uid;
 				}
 			}
-			registerJpegDecoders();
-			if (DcmXfer(originalSyntax).usesEncapsulatedFormat() &&
+			registerPixelDecoders();
+			if (syntax.usesEncapsulatedFormat() &&
 				!DcmCodecList::canChangeCoding(originalSyntax, EXS_LittleEndianExplicit)) {
 				return Error{ErrorCode::UnsupportedEncoding, metadata.transferSyntax};
 			}
 
 			Uint16 rows{}, columns{}, bitsAllocated{}, samples{};
+			const auto expectedSamples = hasThreeColorSamples
+				? channelCount(PixelFormat::Rgb8) : singleSamplePerPixel;
 			if (dataset.findAndGetUint16(DCM_Rows, rows).bad() || rows == 0 ||
 				dataset.findAndGetUint16(DCM_Columns, columns).bad() || columns == 0 ||
-				dataset.findAndGetUint16(DCM_SamplesPerPixel, samples).bad() || samples != monochromeSamplesPerPixel ||
+				dataset.findAndGetUint16(DCM_SamplesPerPixel, samples).bad() || samples != expectedSamples ||
 				dataset.findAndGetUint16(DCM_BitsAllocated, bitsAllocated).bad() ||
 				(bitsAllocated != packedBitsPerPixel &&
 					(bitsAllocated == 0 || bitsAllocated > maxBitsAllocated || bitsAllocated % bitsPerByte != 0))) {
-				return Error{ErrorCode::InvalidDicom, "Invalid monochrome pixel layout."};
+				return Error{ErrorCode::InvalidDicom, "Invalid pixel layout."};
 			}
 			constexpr Sint32 minimumFrameCount = 1;
 			Sint32 frames = minimumFrameCount;
@@ -161,12 +178,30 @@ namespace DICOMViewer {
 				(dataset.findAndGetSint32(DCM_NumberOfFrames, frames).bad() || frames < minimumFrameCount)) {
 				return Error{ErrorCode::InvalidDicom, "Invalid Number of Frames."};
 			}
-			const auto frameBits = static_cast<std::uint64_t>(rows) * columns * bitsAllocated;
+			if (hasThreeColorSamples) {
+				constexpr Uint16 colorByPlane = 1;
+				constexpr Uint16 colorByPixel = 0;
+				Uint16 planarConfiguration{};
+				if (bitsAllocated == packedBitsPerPixel ||
+					dataset.findAndGetUint16(DCM_PlanarConfiguration, planarConfiguration).bad() ||
+					planarConfiguration > colorByPlane ||
+					(isYbr422 && planarConfiguration != colorByPixel)) {
+					return Error{ErrorCode::InvalidDicom, "Invalid color pixel layout."};
+				}
+			}
+			constexpr Uint16 pixelsPerYbr422Group = 2;
+			constexpr Uint16 storedSamplesPerYbr422Pixel = 2;
+			const bool isNativeYbr422 = isYbr422 && syntax.usesNativeFormat();
+			if (isNativeYbr422 && columns % pixelsPerYbr422Group != 0) {
+				return Error{ErrorCode::InvalidDicom, "Native YBR 4:2:2 requires pixel pairs in each row."};
+			}
+			const auto storedSamples = isNativeYbr422 ? storedSamplesPerYbr422Pixel : samples;
+			const auto frameBits = static_cast<std::uint64_t>(rows) * columns * storedSamples * bitsAllocated;
 			if (paddedPixelBytes(frameBits) > std::numeric_limits<Uint32>::max()) {
 				return Error{ErrorCode::UnsupportedEncoding, "One frame exceeds DCMTK's pixel buffer size."};
 			}
 
-			if (DcmXfer(originalSyntax).usesNativeFormat()) {
+			if (syntax.usesNativeFormat()) {
 				DcmElement* pixels = nullptr;
 				if (dataset.findAndGetElement(DCM_PixelData, pixels).bad()) {
 					return Error{ErrorCode::MissingPixelData, "Pixel Data could not be read."};
@@ -194,6 +229,7 @@ namespace DICOMViewer {
 		{
 			metadata.modality = readTag(dataset, DCM_Modality);
 			metadata.orientation = readTag(dataset, DCM_PatientOrientation);
+			metadata.imageOrientation = readTag(dataset, DCM_ImageOrientationPatient);
 			metadata.laterality = readTag(dataset, DCM_ImageLaterality);
 			if (metadata.laterality.empty()) {
 				metadata.laterality = readTag(dataset, DCM_Laterality);
@@ -206,6 +242,9 @@ namespace DICOMViewer {
 			Uint16 bitsStored{};
 			if (dataset.findAndGetUint16(DCM_BitsStored, bitsStored).good()) {
 				metadata.bitsStored = bitsStored;
+			}
+			if (metadata.pixelFormat == PixelFormat::Rgb8) {
+				return;
 			}
 			const auto function = readTag(dataset, DCM_VOILUTFunction);
 			const auto voi = function == "SIGMOID" ? VoiFunction::Sigmoid
@@ -345,6 +384,10 @@ namespace DICOMViewer {
 			metadata.pixelAspectRatio = ratio;
 		}
 
+		if (metadata.pixelFormat == PixelFormat::Rgb8) {
+			return Image{std::move(imageState)};
+		}
+
 		if (!metadata.windows.empty()) {
 			imageState->initialWindow = metadata.windows.front();
 		} else {
@@ -379,6 +422,9 @@ namespace DICOMViewer {
 		if (frame >= state->metadata.frameCount) {
 			return Error{ErrorCode::FrameOutOfRange, "Frame index is outside the image."};
 		}
+		if (window && state->metadata.pixelFormat == PixelFormat::Rgb8) {
+			return Error{ErrorCode::InvalidWindow, "Window Level and Width apply to monochrome images only."};
+		}
 		const auto selected = window ? window : state->initialWindow;
 		if (selected && !selected->isValid()) {
 			return Error{ErrorCode::InvalidWindow, "Window level or width is invalid for this VOI function."};
@@ -396,7 +442,7 @@ namespace DICOMViewer {
 		if (selected && !applyWindow(image, *selected, state->fractionalLut)) {
 			return Error{ErrorCode::InvalidWindow, "DCMTK could not apply the requested VOI window."};
 		}
-		if (!selected && !image.setVoiLut(*state->initialLut)) {
+		if (!selected && state->initialLut && !image.setVoiLut(*state->initialLut)) {
 			return Error{ErrorCode::RenderFailed, "DCMTK could not apply the stored VOI LUT."};
 		}
 
@@ -410,7 +456,7 @@ namespace DICOMViewer {
 		if (!image.getOutputData(pixels.data(), outputSize, outputBits, decodedFrameIndex)) {
 			return Error{ErrorCode::RenderFailed, "DCMTK could not render the requested frame."};
 		}
-		return RenderedFrame{state->metadata.width, state->metadata.height, std::move(pixels)};
+		return RenderedFrame{state->metadata.width, state->metadata.height, state->metadata.pixelFormat, std::move(pixels)};
 	}
 
 }

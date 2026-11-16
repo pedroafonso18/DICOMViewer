@@ -32,7 +32,7 @@ namespace DICOMViewer {
 		Image& operator=(Image&&) noexcept;
 
 		[[nodiscard]] const Metadata& metadata() const noexcept;
-		// A missing window means the initial contrast comes from a stored VOI LUT.
+		// A missing window means a stored VOI LUT is active or the image is RGB.
 		[[nodiscard]] std::optional<ContrastWindow> initialWindow() const noexcept;
 
 		// A missing override restores the initial contrast.

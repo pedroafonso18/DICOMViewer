@@ -6,7 +6,7 @@ add_test(NAME dicom.unit COMMAND dicom_unit_tests)
 
 add_executable(dicom_integration_tests dicom_image_test.cpp)
 target_link_libraries(dicom_integration_tests PRIVATE dicom_core GTest::gtest_main
-    DCMTK::dcmdata DCMTK::dcmjpeg)
+    DCMTK::dcmdata DCMTK::dcmjpeg DCMTK::dcmjpls)
 add_test(NAME dicom.integration COMMAND dicom_integration_tests)
 
 if(TARGET dicom_viewer_ui)

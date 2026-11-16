@@ -5,13 +5,20 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QDockWidget>
 #include <QFile>
 #include <QFileDialog>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMouseEvent>
+#include <QPushButton>
 #include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QWheelEvent>
 
 #include <array>
 #include <chrono>
@@ -29,12 +36,16 @@ namespace DICOMViewer {
 		constexpr auto maxPixelValue = std::numeric_limits<Uint8>::max();
 		constexpr auto dialogPollInterval = std::chrono::milliseconds{10};
 		constexpr auto dialogDeadline = std::chrono::seconds{5};
+		constexpr Uint16 fixtureFrameCount = 2;
+		constexpr double fixtureWindowLevel = 128.0;
+		constexpr double presetWindowLevel = 64.0;
+		constexpr double manualWindowLevel = 20.0;
 
 		void writeDicom(const QString& path)
 		{
 			DcmFileFormat file;
 			auto& dataset = *file.getDataset();
-			ASSERT_TRUE(dataset.putAndInsertString(DCM_SOPClassUID, UID_SecondaryCaptureImageStorage).good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_SOPClassUID, UID_MultiframeGrayscaleByteSecondaryCaptureImageStorage).good());
 			ASSERT_TRUE(dataset.putAndInsertString(DCM_SOPInstanceUID, "1.2.826.0.1.3680043.10.5432.2").good());
 			ASSERT_TRUE(dataset.putAndInsertString(DCM_PhotometricInterpretation, "MONOCHROME2").good());
 			ASSERT_TRUE(dataset.putAndInsertString(DCM_PixelAspectRatio, "2\\1").good());
@@ -45,7 +56,11 @@ namespace DICOMViewer {
 			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_BitsStored, bitsPerSample).good());
 			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_HighBit, bitsPerSample - 1).good());
 			ASSERT_TRUE(dataset.putAndInsertUint16(DCM_PixelRepresentation, unsignedPixelRepresentation).good());
-			const std::array<Uint8, fixtureSide * fixtureSide> pixels{0, maxPixelValue, maxPixelValue, maxPixelValue};
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_NumberOfFrames, std::to_string(fixtureFrameCount).c_str()).good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_WindowCenter, "128\\64").good());
+			ASSERT_TRUE(dataset.putAndInsertString(DCM_WindowWidth, "256\\128").good());
+			const std::array<Uint8, fixtureSide * fixtureSide * fixtureFrameCount> pixels{
+				0, maxPixelValue, maxPixelValue, maxPixelValue, maxPixelValue, maxPixelValue, maxPixelValue, 0};
 			ASSERT_TRUE(dataset.putAndInsertUint8Array(DCM_PixelData, pixels.data(), pixels.size()).good());
 			ASSERT_TRUE(file.saveFile(OFFilename(QFile::encodeName(path).constData()),
 				EXS_LittleEndianExplicit).good());
@@ -53,11 +68,31 @@ namespace DICOMViewer {
 
 		//--------------------------------------------
 
-		TEST(MainWindowTest, PreservesSuccessfulLoadAfterAnInvalidFile)
+		template<class Condition>
+		bool waitFor(Condition done)
+		{
+			QEventLoop loop;
+			QTimer retry;
+			QTimer timeout;
+			QObject::connect(&retry, &QTimer::timeout, &loop, [&] {
+				if (done()) {
+					loop.quit();
+				}
+			});
+			QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+			retry.start(dialogPollInterval);
+			timeout.start(dialogDeadline);
+			loop.exec();
+			return done();
+		}
+
+		//--------------------------------------------
+
+		TEST(MainWindowTest, PreservesAndRestoresTheLoadedImage)
 		{
 			QTemporaryDir directory;
 			ASSERT_TRUE(directory.isValid());
-			const auto validPath = directory.filePath("valid.dcm");
+			const auto validPath = directory.filePath("valid.DCM");
 			ASSERT_NO_FATAL_FAILURE(writeDicom(validPath));
 			const auto invalidPath = directory.filePath("invalid.dcm");
 			QFile invalid(invalidPath);
@@ -75,6 +110,8 @@ namespace DICOMViewer {
 				}
 			}
 			ASSERT_NE(open, nullptr);
+			auto* imageViewport = window.findChild<QWidget*>("imageViewport");
+			ASSERT_NE(imageViewport, nullptr);
 
 			QEventLoop loop;
 			QTimer driver;
@@ -103,6 +140,8 @@ namespace DICOMViewer {
 						continue;
 					}
 					if (auto* picker = qobject_cast<QFileDialog*>(widget)) {
+						EXPECT_TRUE(picker->selectedNameFilter().contains("*.dcm"));
+						EXPECT_TRUE(picker->selectedNameFilter().contains("*.DCM"));
 						auto* input = picker->findChild<QLineEdit*>("fileNameEdit");
 						if (input && selectedFiles < requestedFiles) {
 							input->setText(paths[selectedFiles++]);
@@ -125,7 +164,7 @@ namespace DICOMViewer {
 				}
 				if (requestedFiles == successfulLoadsBeforeError) {
 					summary = window.statusBar()->currentMessage();
-					viewport = window.centralWidget()->grab().toImage();
+					viewport = imageViewport->grab().toImage();
 				}
 				++requestedFiles;
 				QTimer::singleShot(0, &loop, [&] {
@@ -142,10 +181,17 @@ namespace DICOMViewer {
 			EXPECT_EQ(disabledDuringLoad, paths.size());
 			EXPECT_TRUE(sawError);
 			EXPECT_TRUE(open->isEnabled());
-			EXPECT_TRUE(summary.contains("valid.dcm"));
+			EXPECT_TRUE(summary.contains("valid.DCM"));
 			EXPECT_EQ(window.statusBar()->currentMessage(), summary);
+			auto* metadata = window.findChild<QDockWidget*>();
+			ASSERT_NE(metadata, nullptr);
+			EXPECT_TRUE(metadata->isVisible());
+			metadata->toggleViewAction()->trigger();
+			EXPECT_FALSE(metadata->isVisible());
+			metadata->toggleViewAction()->trigger();
+			EXPECT_TRUE(metadata->isVisible());
 			ASSERT_FALSE(viewport.isNull());
-			EXPECT_EQ(window.centralWidget()->grab().toImage(), viewport);
+			EXPECT_EQ(imageViewport->grab().toImage(), viewport);
 
 			const auto center = viewport.rect().center();
 			const auto background = viewport.pixelColor(viewport.rect().topLeft());
@@ -155,6 +201,62 @@ namespace DICOMViewer {
 			const int geometryProbeOffset = viewport.height() / geometryProbeDivisor;
 			EXPECT_NE(viewport.pixelColor(center.x(), center.y() + geometryProbeOffset), background);
 			EXPECT_EQ(viewport.pixelColor(center.x() + geometryProbeOffset, center.y()), background);
+
+			auto* level = window.findChild<QDoubleSpinBox*>("windowLevel");
+			auto* presets = window.findChild<QComboBox*>("contrastPresets");
+			auto* frameIndicator = window.findChild<QLabel*>("frameIndicator");
+			auto* next = window.findChild<QPushButton*>("nextFrame");
+			auto* rotateRight = window.findChild<QAction*>("rotateRight");
+			auto* fit = window.findChild<QAction*>("fitToWindow");
+			auto* restore = window.findChild<QAction*>("restoreView");
+			ASSERT_TRUE(level && presets && frameIndicator && next && rotateRight && fit && restore);
+
+			EXPECT_EQ(level->value(), fixtureWindowLevel);
+			constexpr int secondStoredPresetIndex = 2;
+			presets->setCurrentIndex(secondStoredPresetIndex);
+			presets->activated(secondStoredPresetIndex);
+			ASSERT_TRUE(waitFor([&] { return open->isEnabled(); }));
+			EXPECT_EQ(level->value(), presetWindowLevel);
+
+			level->setValue(manualWindowLevel);
+			next->click();
+			ASSERT_TRUE(waitFor([&] { return open->isEnabled(); }));
+			EXPECT_EQ(level->value(), manualWindowLevel);
+			EXPECT_EQ(frameIndicator->text(), QStringLiteral("2 of 2"));
+			EXPECT_FALSE(next->isEnabled());
+
+			const auto beforeRotation = imageViewport->grab().toImage();
+			rotateRight->trigger();
+			const auto rotated = imageViewport->grab().toImage();
+			EXPECT_NE(rotated, beforeRotation);
+
+			constexpr int angleUnitsPerWheelStep = 120;
+			QWheelEvent wheel(center, imageViewport->mapToGlobal(center), {},
+				{0, angleUnitsPerWheelStep}, Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+			QApplication::sendEvent(imageViewport, &wheel);
+			const auto zoomed = imageViewport->grab().toImage();
+			EXPECT_NE(zoomed, rotated);
+
+			const auto end = center + QPoint(geometryProbeOffset, 0);
+			QMouseEvent press(QEvent::MouseButtonPress, center, imageViewport->mapToGlobal(center),
+				Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+			QMouseEvent move(QEvent::MouseMove, end, imageViewport->mapToGlobal(end),
+				Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+			QMouseEvent release(QEvent::MouseButtonRelease, end, imageViewport->mapToGlobal(end),
+				Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+			QApplication::sendEvent(imageViewport, &press);
+			QApplication::sendEvent(imageViewport, &move);
+			QApplication::sendEvent(imageViewport, &release);
+			EXPECT_NE(imageViewport->grab().toImage(), zoomed);
+
+			fit->trigger();
+			EXPECT_EQ(imageViewport->grab().toImage(), rotated);
+
+			restore->trigger();
+			ASSERT_TRUE(waitFor([&] { return open->isEnabled(); }));
+			EXPECT_EQ(level->value(), fixtureWindowLevel);
+			EXPECT_EQ(frameIndicator->text(), QStringLiteral("1 of 2"));
+			EXPECT_EQ(imageViewport->grab().toImage(), viewport);
 		}
 
 	} // namespace

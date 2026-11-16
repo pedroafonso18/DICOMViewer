@@ -14,6 +14,7 @@ namespace DICOMViewer {
 		VoiFunction function{VoiFunction::Linear};
 
 		[[nodiscard]] bool isValid() const noexcept;
+		bool operator==(const ContrastWindow&) const = default;
 	};
 
 } // namespace DICOMViewer
